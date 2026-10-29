@@ -32,7 +32,11 @@ export async function collectionsReport(
   const rows = await prisma.$queryRaw<{ month: string; collected_sen: bigint }[]>(
     Prisma.sql`
       with months(m) as (
-        select generate_series(${from}-01, ${to}-01, interval '1 month')::date
+        select generate_series(
+          (${from} || '-01')::date, 
+          (${to} || '-01')::date, 
+          interval '1 month'
+        )::date
       )
       select to_char(m, 'YYYY-MM') as month,
              (select coalesce(sum(amount_sen), 0)
@@ -41,13 +45,12 @@ export async function collectionsReport(
                  and status = 'approved'
                  and date_trunc('month', received_at at time zone 'Asia/Kuala_Lumpur') = m
              ) as collected_sen
-      from months
-      order by m
+        from months
+        order by m
     `,
   )
   return rows.map((r) => ({ month: r.month, collectedSen: Number(r.collected_sen) }))
 }
-
 /** The organization's last 6 months ending with the current Malaysia month. */
 export async function collectionsReportLast6Months(
   orgId: string,
