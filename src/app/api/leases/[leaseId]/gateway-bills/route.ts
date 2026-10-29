@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 
 import { forbidden, getCaller, notFound, serverError, unauthorized } from '@/lib/auth'
 import { malaysiaDateOf } from '@/lib/billing'
+import { dueNowSen, type DueNowInvoice } from '@/lib/due-now'
 import { prisma } from '@/lib/prisma'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -34,12 +35,14 @@ export async function POST(
     where: { leaseId: lease.id },
     select: { id: true, dueDate: true, amountSen: true, allocations: { select: { amountSen: true } } },
   })
-  const totalDueSen = computeDueUnpaid(
-    invoiceRows.map((i) => ({
-      dueDate: i.dueDate.toISOString().slice(0, 10),
-      amountSen: Number(i.amountSen),
-      paidSen: i.allocations.reduce((paid, a) => paid + Number(a.amountSen), 0),
-    })),
+  const totalDueSen = dueNowSen(
+    invoiceRows.map(
+      (i): DueNowInvoice => ({
+        dueDate: i.dueDate.toISOString().slice(0, 10),
+        amountSen: Number(i.amountSen),
+        paidSen: i.allocations.reduce((paid, a) => paid + Number(a.amountSen), 0),
+      }),
+    ),
     today,
   )
 
@@ -61,15 +64,4 @@ export async function POST(
     console.error('gateway bill creation failed', error)
     return serverError()
   }
-}
-
-function computeDueUnpaid(
-  invoices: { dueDate: string; amountSen: number; paidSen: number }[],
-  todayMy: string,
-): number {
-  return invoices
-    .filter((i) => i.dueDate <= todayMy)
-    .map((i) => i.amountSen - i.paidSen)
-    .filter((unpaid) => unpaid > 0)
-    .reduce((sum, unpaid) => sum + unpaid, 0)
 }

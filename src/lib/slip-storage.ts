@@ -29,6 +29,13 @@ export async function slipExists(path: string): Promise<boolean> {
   return data.some((object) => object.id !== null && object.name === fileName)
 }
 
+/** A short-lived signed URL, or null when the file cannot be found. */
+export async function signedSlipUrl(path: string, expiresIn: number): Promise<string | null> {
+  const { data, error } = await storage().createSignedUrl(path, expiresIn)
+  if (error !== null || data === null) return null
+  return data.signedUrl
+}
+
 /** Remove an uploaded slip (used when the payment record fails after upload). */
 export async function deleteSlip(path: string): Promise<void> {
   await storage().remove([path])

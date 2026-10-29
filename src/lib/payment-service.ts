@@ -141,18 +141,24 @@ export async function recordPayment(
   } catch (error) {
     if (error instanceof CapExceededError) {
       // Recording failed after the slip upload: the file must not be left behind.
-      if (input.slipPath !== undefined) {
-        try {
-          await deleteSlip(input.slipPath)
-        } catch (deleteError) {
-          console.error('failed to clean up slip after refused payment', deleteError)
-        }
-      }
+      await maybeDeleteSlip(input)
       return { ok: false, status: 422, error: error.message }
     }
     if (error instanceof LeaseIsGoneError) return { ok: false, status: 404, error: 'Not found' }
+    // Recording failed after the slip upload: the file must not be left behind.
+    await maybeDeleteSlip(input)
     console.error('payment recording failed', error)
     return { ok: false, status: 500, error: 'Could not record the payment' }
+  }
+}
+
+/** Best-effort cleanup of an uploaded slip after the recording failed. */
+async function maybeDeleteSlip(input: RecordPaymentInput): Promise<void> {
+  if (input.slipPath === undefined) return
+  try {
+    await deleteSlip(input.slipPath)
+  } catch (deleteError) {
+    console.error('failed to clean up slip after refused payment', deleteError)
   }
 }
 
