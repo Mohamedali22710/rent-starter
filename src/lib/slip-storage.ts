@@ -33,3 +33,13 @@ export async function slipExists(path: string): Promise<boolean> {
 export async function deleteSlip(path: string): Promise<void> {
   await storage().remove([path])
 }
+
+/** Upload a slip into the bucket. The bucket enforces 5 MB and its MIME list. */
+export async function uploadSlip(
+  path: string,
+  bytes: Uint8Array,
+  contentType: 'image/jpeg' | 'image/png' | 'application/pdf',
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { error } = await storage().upload(path, bytes, { contentType, upsert: false })
+  return error === null ? { ok: true } : { ok: false, error: error.message }
+}

@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server'
 
-import { badRequest, forbidden, getCaller, notFound, serverError, unauthorized } from '@/lib/auth'
-import { generateSchedule } from '@/lib/billing'
-import { prisma } from '@/lib/prisma'
+import { badRequest, forbidden, getCaller, unauthorized } from '@/lib/auth'
+import { createLease } from '@/lib/lease-service'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -15,12 +14,8 @@ interface CreateLeaseBody {
   depositSen: number
 }
 
-const OVERLAP_CONSTRAINT = 'leases_no_unit_overlap'
-
 /**
- * POST /api/leases — managers only. Validates the input through
- * generateSchedule, stores the lease and exactly the invoices the schedule
- * returns, all or nothing. The database's exclusion constraint on
+ * POST /api/leases — managers only. The database's exclusion constraint on
  * (unit_id, daterange(start_date, end_date, '[]')) guarantees leases on the
  * same unit never overlap even when two requests arrive at the same moment;
  * the loser commits second and gets 409.
@@ -36,84 +31,13 @@ export async function POST(request: Request) {
   } catch {
     return badRequest('Request body must be JSON')
   }
+
   const parsed = parseBody(body)
   if (typeof parsed === 'string') return badRequest(parsed)
 
-  let schedule
-  try {
-    schedule = generateSchedule({
-      startDate: parsed.startDate,
-      endDate: parsed.endDate,
-      monthlyRentSen: parsed.monthlyRentSen,
-      depositSen: parsed.depositSen,
-    })
-  } catch {
-    return badRequest('Invalid lease dates or amounts')
-  }
-
-  // IDs in the body are untrusted: both unit and tenant must belong to the
-  // caller's organization (404: do not reveal other organizations' records).
-  const [unit, tenant] = await Promise.all([
-    prisma.unit.findUnique({ where: { id: parsed.unitId } }),
-    prisma.tenant.findUnique({ where: { id: parsed.tenantId } }),
-  ])
-  if (unit === null || unit.orgId !== caller.orgId) return notFound()
-  if (tenant === null || tenant.orgId !== caller.orgId) return notFound()
-
-  try {
-    const lease = await prisma.$transaction(async (tx) => {
-      const created = await tx.lease.create({
-        data: {
-          orgId: caller.orgId,
-          unitId: parsed.unitId,
-          tenantId: parsed.tenantId,
-          startDate: new Date(`${parsed.startDate}T00:00:00Z`),
-          endDate: new Date(`${parsed.endDate}T00:00:00Z`),
-          monthlyRentSen: BigInt(parsed.monthlyRentSen),
-          depositSen: BigInt(parsed.depositSen),
-        },
-      })
-      await tx.invoice.createMany({
-        data: schedule.map((s) => ({
-          orgId: caller.orgId,
-          leaseId: created.id,
-          kind: s.kind,
-          periodIndex: s.periodIndex,
-          periodStart: s.periodStart === null ? null : new Date(`${s.periodStart}T00:00:00Z`),
-          periodEnd: s.periodEnd === null ? null : new Date(`${s.periodEnd}T00:00:00Z`),
-          dueDate: new Date(`${s.dueDate}T00:00:00Z`),
-          amountSen: BigInt(s.amountSen),
-        })),
-      })
-      await tx.auditLog.create({
-        data: {
-          orgId: caller.orgId,
-          actorId: caller.userId,
-          action: 'lease.created',
-          entityId: created.id,
-          details: {
-            unitId: parsed.unitId,
-            tenantId: parsed.tenantId,
-            startDate: parsed.startDate,
-            endDate: parsed.endDate,
-            monthlyRentSen: parsed.monthlyRentSen,
-            depositSen: parsed.depositSen,
-          },
-        },
-      })
-      return created
-    })
-
-    return NextResponse.json({ id: lease.id }, { status: 201 })
-  } catch (error) {
-    const message = error instanceof Error ? `${error.message} ${JSON.stringify(error)}` : ''
-    if (message.includes(OVERLAP_CONSTRAINT) || /exclusion constraint/i.test(message)) {
-      return NextResponse.json({ error: 'A lease overlapping this unit exists' }, { status: 409 })
-    }
-    // The overlap constraint is the expected failure; anything else is a bug.
-    console.error('lease creation failed', error)
-    return serverError()
-  }
+  const result = await createLease({ ...parsed, orgId: caller.orgId, actorId: caller.userId })
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status })
+  return NextResponse.json({ id: result.value.id }, { status: 201 })
 }
 
 function parseBody(body: unknown): CreateLeaseBody | string {

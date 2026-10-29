@@ -1,15 +1,7 @@
 import { NextResponse } from 'next/server'
 
-import { allocatePayment } from '@/lib/allocation'
-import { badRequest, forbidden, getCaller, notFound, serverError, unauthorized } from '@/lib/auth'
-import { prisma } from '@/lib/prisma'
-import {
-  CapExceededError,
-  LeaseIsGoneError,
-  lockLease,
-  remainingBalance,
-} from '@/lib/lease-lock'
-import { deleteSlip, slipExists } from '@/lib/slip-storage'
+import { badRequest, forbidden, getCaller, notFound, unauthorized } from '@/lib/auth'
+import { recordPayment } from '@/lib/payment-service'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -48,106 +40,26 @@ export async function POST(
   const parsed = parseBody(body)
   if (typeof parsed === 'string') return badRequest(parsed)
 
-  // Visibility first: another organization's lease is 404.
-  const lease = await prisma.lease.findUnique({
-    where: { id: leaseId },
-    select: { id: true, orgId: true },
-  })
-  if (lease === null || lease.orgId !== caller.orgId) return notFound()
-
-  // A bank transfer needs a slip: a path in the caller's own organization's
-  // folder, pointing at an existing file.
-  if (parsed.method === 'bank_transfer' && parsed.slipPath === undefined) {
-    return badRequest('A bank transfer payment needs a slip')
-  }
-  if (parsed.slipPath !== undefined) {
-    if (!parsed.slipPath.startsWith(`${caller.orgId}/`)) {
-      return badRequest('The slip must be in your own organization folder')
-    }
-    if (!(await slipExists(parsed.slipPath))) {
-      return badRequest('The slip file does not exist')
-    }
-  }
-
   const receivedAt = new Date(parsed.receivedAt)
-  if (Number.isNaN(receivedAt.getTime())) return badRequest('receivedAt must be an ISO 8601 instant')
-
-  try {
-    const created = await prisma.$transaction(async (tx) => {
-      const lockedLease = await lockLease(tx, lease.id)
-      if (lockedLease === null || lockedLease.orgId !== caller.orgId) {
-        throw new LeaseIsGoneError()
-      }
-
-      const remaining = await remainingBalance(tx, lease.id)
-      if (parsed.amountSen > remaining) {
-        throw new CapExceededError('Payment is more than the lease remaining balance')
-      }
-
-      const approvedImmediately = caller.role === 'manager'
-      const payment = await tx.payment.create({
-        data: {
-          orgId: caller.orgId,
-          leaseId: lease.id,
-          amountSen: BigInt(parsed.amountSen),
-          method: parsed.method,
-          status: approvedImmediately ? 'approved' : 'pending_verification',
-          receivedAt,
-          slipPath: parsed.slipPath ?? null,
-          createdBy: caller.userId,
-        },
-      })
-      await tx.auditLog.create({
-        data: {
-          orgId: caller.orgId,
-          actorId: caller.userId,
-          action: 'payment.recorded',
-          entityId: payment.id,
-          details: {
-            leaseId: lease.id,
-            amountSen: parsed.amountSen,
-            method: parsed.method,
-            receivedAt: receivedAt.toISOString(),
-          },
-        },
-      })
-      if (approvedImmediately) {
-        const plan = await allocatePayment(tx, payment.id)
-        await tx.auditLog.create({
-          data: {
-            orgId: caller.orgId,
-            actorId: caller.userId,
-            action: 'payment.approved',
-            entityId: payment.id,
-            details: {
-              leaseId: lease.id,
-              amountSen: parsed.amountSen,
-              unappliedSen: plan.unappliedSen,
-              auto: true,
-            },
-          },
-        })
-      }
-      return payment
-    })
-
-    return NextResponse.json({ id: created.id, status: created.status }, { status: 201 })
-  } catch (error) {
-    if (error instanceof CapExceededError) {
-      // The recording failed after the slip upload, so the file most not be
-      // left behind. Delete it (best effort: it is the caller's own file).
-      if (parsed.slipPath !== undefined) {
-        try {
-          await deleteSlip(parsed.slipPath)
-        } catch (deleteError) {
-          console.error('failed to clean up slip after refused payment', deleteError)
-        }
-      }
-      return NextResponse.json({ error: error.message }, { status: 422 })
-    }
-    if (error instanceof LeaseIsGoneError) return notFound()
-    return serverError()
+  if (Number.isNaN(receivedAt.getTime())) {
+    return badRequest('receivedAt must be an ISO 8601 instant')
   }
+
+  const result = await recordPayment({
+    leaseId,
+    orgId: caller.orgId,
+    actorId: caller.userId,
+    actorRole: caller.role === 'manager' ? 'manager' : 'staff',
+    amountSen: parsed.amountSen,
+    method: parsed.method,
+    receivedAt,
+    slipPath: parsed.slipPath,
+  })
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status })
+  return NextResponse.json(
+    { id: result.value.id, status: result.value.status },
+    { status: 201 },
+  )
 }
 
 function parseBody(body: unknown): RecordPaymentBody | string {

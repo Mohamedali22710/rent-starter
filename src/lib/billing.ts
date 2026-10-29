@@ -153,7 +153,6 @@ export function generateSchedule(lease: {
 }): ScheduledInvoice[] {
   const start = parseDate(lease.startDate, 'startDate')
   const end = parseDate(lease.endDate, 'endDate')
-
   if (!isInteger(lease.monthlyRentSen) || lease.monthlyRentSen <= 0) {
     throw new Error('monthlyRentSen must be a positive integer number of sen')
   }
@@ -182,7 +181,6 @@ export function generateSchedule(lease: {
     })
   }
 
-  const startDays = toDays(start)
   const endDays = toDays(end)
 
   for (let k = 0; ; k++) {
